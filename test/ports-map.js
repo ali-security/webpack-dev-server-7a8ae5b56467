@@ -45,6 +45,7 @@ const portsList = {
   Iframe: 1,
   'cross-origin-request': 1,
   CrossOriginRequest: 2,
+  'proxy-option-hmr': 1,
 };
 
 let startPort = 8089;

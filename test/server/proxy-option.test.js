@@ -1,13 +1,16 @@
 'use strict';
 
+const http = require('http');
 const path = require('path');
 const request = require('supertest');
 const express = require('express');
 const bodyParser = require('body-parser');
 const WebSocket = require('ws');
 const testServer = require('../helpers/test-server');
+const BaseServer = require('../../lib/servers/BaseServer');
 const config = require('../fixtures/proxy-config/webpack.config');
 const [port1, port2, port3, port4] = require('../ports-map')['proxy-option'];
+const port5 = require('../ports-map')['proxy-option-hmr'];
 
 const WebSocketServer = WebSocket.Server;
 const contentBase = path.resolve(__dirname, '../fixtures/proxy-config');
@@ -419,6 +422,359 @@ describe('proxy option', () => {
 
     it('DELETE method', (done) => {
       req.delete('/delete').expect(200, 'DELETE method from proxy', done);
+    });
+  });
+
+  describe('should not forward the dev server socket upgrade to a websocket proxy', () => {
+    const devServerUrl = `http://localhost:${port3}`;
+    const liveReloadMessage = JSON.stringify({ type: 'liveReload' });
+
+    let backend;
+    let backendWss;
+    let backendSockets;
+    let backendUpgradeCount;
+    let proxyErrors;
+
+    // Start a backend (the user proxy target) answering every HTTP request and
+    // accepting (or destroying) every websocket upgrade, and a dev server
+    // proxying everything to it with `ws: true`.
+    const setup = (options, destroyUpgrades) =>
+      new Promise((resolve, reject) => {
+        backendUpgradeCount = 0;
+        backendSockets = [];
+        proxyErrors = [];
+
+        backend = http.createServer((req, res) => {
+          res.end('from backend');
+        });
+
+        backend.on('connection', (socket) => {
+          backendSockets.push(socket);
+        });
+
+        if (destroyUpgrades) {
+          backend.on('upgrade', (req, socket) => {
+            backendUpgradeCount += 1;
+            socket.destroy();
+          });
+        } else {
+          backendWss = new WebSocketServer({ server: backend });
+          backendWss.on('connection', () => {
+            backendUpgradeCount += 1;
+          });
+        }
+
+        backend.listen(port5, () => {
+          testServer.start(
+            config,
+            Object.assign(
+              {
+                contentBase,
+                proxy: [
+                  {
+                    context: '/',
+                    target: `http://localhost:${port5}`,
+                    ws: true,
+                    logProvider: () => {
+                      const noop = () => {};
+
+                      return {
+                        log: noop,
+                        debug: noop,
+                        info: noop,
+                        warn: noop,
+                        error: (message) => {
+                          proxyErrors.push(message);
+                        },
+                      };
+                    },
+                  },
+                ],
+                port: port3,
+              },
+              options
+            ),
+            (err) => (err ? reject(err) : resolve())
+          );
+        });
+      });
+
+    const teardown = () =>
+      new Promise((resolve) => {
+        if (backendWss) {
+          backendWss.clients.forEach((client) => {
+            client.terminate();
+          });
+          backendWss.close();
+          backendWss = null;
+        }
+
+        backendSockets.forEach((socket) => {
+          socket.destroy();
+        });
+
+        testServer.close(() => {
+          backend.close(() => {
+            resolve();
+          });
+        });
+      });
+
+    // Open a websocket to `socketPath` on the dev server and report whether the
+    // handshake completed, the messages received and whether the upgrade was
+    // forwarded to the proxy target.
+    const probe = (socketPath) =>
+      new Promise((resolve) => {
+        const before = backendUpgradeCount;
+        const messages = [];
+        let opened = false;
+        let finished = false;
+        let timer = null;
+
+        const client = new WebSocket(`ws://localhost:${port3}${socketPath}`, {
+          origin: devServerUrl,
+        });
+
+        const finish = () => {
+          if (finished) {
+            return;
+          }
+
+          finished = true;
+          clearTimeout(timer);
+
+          // let the proxy forward the upgrade to its target, if it does
+          setTimeout(() => {
+            client.terminate();
+
+            resolve({
+              opened,
+              messages,
+              forwarded: backendUpgradeCount > before,
+            });
+          }, 500);
+        };
+
+        client.on('open', () => {
+          opened = true;
+          finish();
+        });
+
+        client.on('message', (message) => {
+          messages.push(message);
+        });
+
+        // the handshake was refused or the socket was broken
+        client.on('error', finish);
+
+        timer = setTimeout(finish, 3000);
+      });
+
+    // Proxy a plain HTTP request first: with `ws: true` the proxy middleware
+    // would subscribe itself to the server "upgrade" event at this point.
+    const proxyRequest = () =>
+      request(devServerUrl)
+        .get('/proxied')
+        .expect(200, 'from backend');
+
+    const expectServedLocally = (result) => {
+      expect(result.opened).toBe(true);
+      expect(result.forwarded).toBe(false);
+    };
+
+    [
+      {
+        transportMode: 'ws',
+        // the `ws` server only handles its exact path (query string stripped)
+        socketPaths: ['/sockjs-node', '/sockjs-node?token=1'],
+        otherPaths: [
+          '/not-hmr',
+          '//sockjs-node',
+          '/sockjs-node/',
+          '/SOCKJS-NODE',
+          '/sockjs-Node',
+          '/%73ockjs-node',
+        ],
+      },
+      {
+        transportMode: 'sockjs',
+        // the sockjs server handles every path under its prefix
+        socketPaths: [
+          '/sockjs-node/websocket',
+          '/sockjs-node/000/abcd1234/websocket',
+        ],
+        otherPaths: [
+          '/not-hmr',
+          '//sockjs-node/websocket',
+          '/SOCKJS-NODE/websocket',
+          '/sockjs-node-other/websocket',
+        ],
+      },
+    ].forEach((mode) => {
+      describe(`with transportMode: ${mode.transportMode}`, () => {
+        beforeAll(() => setup({ transportMode: mode.transportMode }));
+
+        afterAll(teardown);
+
+        it('serves the socket upgrade locally and does not forward it to the proxy', () =>
+          probe(mode.socketPaths[0]).then((result) => {
+            expectServedLocally(result);
+            expect(result.messages).toContain(liveReloadMessage);
+          }));
+
+        mode.socketPaths.forEach((socketPath) => {
+          it(`does not forward the socket upgrade (${socketPath}) to the proxy`, () =>
+            probe(socketPath).then(expectServedLocally));
+        });
+
+        mode.otherPaths.forEach((otherPath) => {
+          it(`forwards a non-socket upgrade (${otherPath}) to the proxy`, () =>
+            probe(otherPath).then((result) => {
+              expect(result.forwarded).toBe(true);
+            }));
+        });
+      });
+
+      // A page is loaded through the proxy before any websocket is opened, the
+      // way a browser does: the proxy middleware must not have subscribed itself
+      // to the server "upgrade" event on that first request.
+      describe(`with transportMode: ${mode.transportMode} after a proxied request`, () => {
+        beforeAll(() => setup({ transportMode: mode.transportMode }));
+
+        afterAll(teardown);
+
+        it('does not forward the socket upgrade to the proxy', () =>
+          proxyRequest()
+            .then(() => probe(mode.socketPaths[0]))
+            .then((result) => {
+              expectServedLocally(result);
+              expect(result.messages).toContain(liveReloadMessage);
+            }));
+
+        it('forwards a non-socket upgrade (/not-hmr) to the proxy', () =>
+          probe('/not-hmr').then((result) => {
+            expect(result.forwarded).toBe(true);
+          }));
+      });
+    });
+
+    [
+      {
+        transportMode: 'ws',
+        socketPath: '/custom-hmr',
+        otherPath: '/sockjs-node',
+      },
+      {
+        transportMode: 'sockjs',
+        socketPath: '/custom-hmr/websocket',
+        otherPath: '/sockjs-node/websocket',
+      },
+    ].forEach((mode) => {
+      describe(`with transportMode: ${mode.transportMode} and a custom sockPath`, () => {
+        beforeAll(() =>
+          setup({ transportMode: mode.transportMode, sockPath: '/custom-hmr/' })
+        );
+
+        afterAll(teardown);
+
+        it(`does not forward the socket upgrade (${mode.socketPath}) to the proxy`, () =>
+          proxyRequest()
+            .then(() => probe(mode.socketPath))
+            .then((result) => {
+              expectServedLocally(result);
+              expect(result.messages).toContain(liveReloadMessage);
+            }));
+
+        it(`forwards the default socket path (${mode.otherPath}) to the proxy`, () =>
+          probe(mode.otherPath).then((result) => {
+            expect(result.forwarded).toBe(true);
+          }));
+      });
+    });
+
+    describe('with a custom transportMode.server implementation', () => {
+      /* eslint-disable class-methods-use-this */
+      class CustomWebsocketServer extends BaseServer {
+        constructor(server) {
+          super(server);
+
+          this.wsServer = new WebSocketServer({
+            noServer: true,
+            path: this.server.sockPath,
+          });
+
+          this.server.listeningApp.on('upgrade', (req, socket, head) => {
+            if (!this.wsServer.shouldHandle(req)) {
+              return;
+            }
+
+            this.wsServer.handleUpgrade(req, socket, head, (connection) => {
+              this.wsServer.emit('connection', connection, req);
+            });
+          });
+        }
+
+        send(connection, message) {
+          connection.send(message);
+        }
+
+        close(connection) {
+          connection.close();
+        }
+
+        onConnection(f) {
+          this.wsServer.on('connection', (connection, req) => {
+            f(connection, req.headers);
+          });
+        }
+
+        onConnectionClose(connection, f) {
+          connection.on('close', f);
+        }
+      }
+      /* eslint-enable class-methods-use-this */
+
+      beforeAll(() =>
+        setup({
+          transportMode: { server: CustomWebsocketServer, client: 'ws' },
+        })
+      );
+
+      afterAll(teardown);
+
+      ['/sockjs-node', '/sockjs-node?token=1'].forEach((socketPath) => {
+        it(`does not forward the socket upgrade (${socketPath}) to the proxy`, () =>
+          probe(socketPath).then(expectServedLocally));
+      });
+
+      it('forwards a non-socket upgrade (/not-hmr) to the proxy', () =>
+        probe('/not-hmr').then((result) => {
+          expect(result.forwarded).toBe(true);
+        }));
+    });
+
+    // the proxy target refuses the upgrade: forwarding the dev server socket
+    // would surface a proxy error and break the socket
+    ['ws', 'sockjs'].forEach((transportMode) => {
+      describe(`with transportMode: ${transportMode} and a target refusing upgrades`, () => {
+        const socketPath =
+          transportMode === 'ws' ? '/sockjs-node' : '/sockjs-node/websocket';
+
+        beforeAll(() => setup({ transportMode }, true));
+
+        afterAll(teardown);
+
+        it('does not surface any [HPM] error when the socket client connects', () =>
+          proxyRequest()
+            .then(() => probe(socketPath))
+            .then((result) => {
+              expectServedLocally(result);
+              expect(result.messages).toContain(liveReloadMessage);
+              expect(
+                proxyErrors.filter((message) => /\[HPM\]/.test(message))
+              ).toEqual([]);
+            }));
+      });
     });
   });
 });
