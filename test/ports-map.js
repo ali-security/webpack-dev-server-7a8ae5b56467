@@ -46,6 +46,7 @@ const portsList = {
   'cross-origin-request': 1,
   CrossOriginRequest: 2,
   'proxy-option-hmr': 1,
+  'proxy-web-socket-origin': 2,
 };
 
 let startPort = 8089;

@@ -290,7 +290,9 @@ describe('proxy option', () => {
         });
 
         beforeEach((done) => {
-          ws = new WebSocket(`ws://localhost:${port3}/proxy3/socket`);
+          ws = new WebSocket(`ws://localhost:${port3}/proxy3/socket`, {
+            origin: `http://localhost:${port3}`,
+          });
           ws.on('message', (message) => {
             responseMessage = message;
             done();
