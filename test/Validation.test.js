@@ -245,4 +245,153 @@ describe('Validation', () => {
       });
     });
   });
+
+  describe('checkOrigin', () => {
+    afterEach((done) => {
+      server.close(() => {
+        done();
+      });
+    });
+
+    it('should not allow origin headers containing an IP address that does not match the host header', () => {
+      const options = {};
+
+      const tests = [
+        'http://192.168.1.1',
+        'http://192.168.1.1/',
+        'http://192.168.1.10:8080',
+        'https://192.168.1.10:8443',
+        'http://[ad42::1de2:54c2:c2fa:1234]',
+        'http://[ad42::1de2:54c2:c2fa:1234]:8080',
+      ];
+
+      server = new Server(compiler, options);
+
+      tests.forEach((test) => {
+        const headers = { host: 'localhost:8080', origin: test };
+
+        if (server.checkOrigin(headers)) {
+          throw new Error(`Validation didn't fail for origin ${test}`);
+        }
+      });
+    });
+
+    it('should not allow origin headers containing an IP address that differs from an IP host header', () => {
+      const options = {};
+
+      const headers = {
+        host: '127.0.0.1:8080',
+        origin: 'http://192.168.1.1',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkHost(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+
+      if (server.checkOrigin(headers)) {
+        throw new Error("Validation didn't fail");
+      }
+    });
+
+    it('should not allow origin headers containing an IP address without a host header', () => {
+      const options = {};
+
+      const headers = {
+        origin: 'http://192.168.1.1',
+      };
+
+      server = new Server(compiler, options);
+
+      if (server.checkOrigin(headers)) {
+        throw new Error("Validation didn't fail");
+      }
+    });
+
+    it('should allow origin headers containing an IP address that matches the host header', () => {
+      const options = {};
+
+      const tests = [
+        { host: '127.0.0.1:8080', origin: 'http://127.0.0.1:8080' },
+        { host: '192.168.1.10:8080', origin: 'http://192.168.1.10:8080' },
+        { host: '192.168.1.10', origin: 'https://192.168.1.10' },
+        { host: '[::1]:8080', origin: 'http://[::1]:8080' },
+        {
+          host: '[ad42::1de2:54c2:c2fa:1234]:8080',
+          origin: 'http://[ad42::1de2:54c2:c2fa:1234]:8080',
+        },
+      ];
+
+      server = new Server(compiler, options);
+
+      tests.forEach((headers) => {
+        if (!server.checkHost(headers) || !server.checkOrigin(headers)) {
+          throw new Error(`Validation didn't pass for origin ${headers.origin}`);
+        }
+      });
+    });
+
+    it('should allow origin headers containing an IP address listed in allowedHosts', () => {
+      const options = { allowedHosts: ['192.168.1.10'] };
+
+      const headers = {
+        host: 'localhost:8080',
+        origin: 'http://192.168.1.10:8080',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkOrigin(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+
+    it('should allow origin headers containing an IP address matching options.public', () => {
+      const options = { public: '192.168.1.10:8080' };
+
+      const headers = {
+        host: 'localhost:8080',
+        origin: 'http://192.168.1.10:8080',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkOrigin(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+
+    it('should allow localhost origin headers', () => {
+      const options = {};
+
+      const headers = {
+        host: '127.0.0.1:8080',
+        origin: 'http://localhost:8080',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkOrigin(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+
+    it('should always allow any origin if options.disableHostCheck is set', () => {
+      const options = {
+        disableHostCheck: true,
+      };
+
+      const headers = {
+        host: 'localhost:8080',
+        origin: 'http://192.168.1.1',
+      };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkOrigin(headers)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+  });
 });

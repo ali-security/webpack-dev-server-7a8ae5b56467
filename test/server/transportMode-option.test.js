@@ -4,6 +4,7 @@
   class-methods-use-this
 */
 const request = require('supertest');
+const ws = require('ws');
 const sockjs = require('sockjs');
 const SockJS = require('sockjs-client/dist/sockjs');
 const SockJSServer = require('../../lib/servers/SockJSServer');
@@ -434,6 +435,98 @@ describe('transportMode', () => {
             expect(data).toMatchSnapshot();
             done();
           }, 5000);
+        });
+      });
+
+      [
+        {
+          title: 'sockjs',
+          transportMode: 'sockjs',
+          // raw websocket endpoint of the sockjs server
+          socketPath: '/sockjs-node/websocket',
+        },
+        {
+          title: 'ws',
+          transportMode: 'ws',
+          socketPath: '/sockjs-node',
+        },
+      ].forEach((mode) => {
+        describe(`with an origin header containing an IP address ("${mode.title}")`, () => {
+          const invalidHeaderMessage = JSON.stringify({
+            type: 'error',
+            data: 'Invalid Host/Origin header',
+          });
+
+          // resolves with the received events once the server closes the
+          // connection, or after a delay if the connection stays open
+          const connect = (origin) =>
+            new Promise((resolve) => {
+              const data = [];
+              let finished = false;
+              // eslint-disable-next-line new-cap
+              const client = new ws(
+                `ws://127.0.0.1:${port}${mode.socketPath}`,
+                { origin }
+              );
+
+              const finish = () => {
+                if (finished) {
+                  return;
+                }
+
+                finished = true;
+                client.terminate();
+                resolve(data);
+              };
+
+              client.on('open', () => {
+                data.push('open');
+              });
+
+              client.on('message', (message) => {
+                data.push(message);
+              });
+
+              client.on('close', () => {
+                data.push('close');
+                finish();
+              });
+
+              client.on('error', () => {
+                data.push('error');
+                finish();
+              });
+
+              setTimeout(finish, 3000);
+            });
+
+          beforeEach((done) => {
+            server = testServer.start(
+              config,
+              {
+                port,
+                host: '0.0.0.0',
+                transportMode: mode.transportMode,
+              },
+              done
+            );
+          });
+
+          it('disconnects a web client served from a different IP address', () =>
+            connect('http://192.168.1.1/').then((data) => {
+              expect(data[0]).toEqual('open');
+              expect(data[1]).toEqual(invalidHeaderMessage);
+              expect(data).toContain('close');
+              expect(server.sockets.length).toEqual(0);
+            }));
+
+          it('accepts a web client served from the same IP address', () =>
+            connect(`http://127.0.0.1:${port}`).then((data) => {
+              expect(data[0]).toEqual('open');
+              expect(data.length).toBeGreaterThan(1);
+              expect(data).not.toContain(invalidHeaderMessage);
+              expect(data).not.toContain('close');
+            }));
         });
       });
     });
