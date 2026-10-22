@@ -1,6 +1,10 @@
 'use strict';
 
+const http = require('http');
+const net = require('net');
+const url = require('url');
 const request = require('supertest');
+const WebSocket = require('ws');
 const testServer = require('../helpers/test-server');
 const config = require('../fixtures/simple-config/webpack.config');
 const port = require('../ports-map')['cross-origin-request'];
@@ -524,6 +528,284 @@ describe('cross-site request forgery on state-changing endpoints', () => {
           expect(invalidateSpy).toHaveBeenCalledTimes(1);
         })
         .end(done);
+    });
+  });
+});
+
+describe('malformed Host/Origin headers', () => {
+  const invalidHeaderMessage = JSON.stringify({
+    type: 'error',
+    data: 'Invalid Host/Origin header',
+  });
+
+  // invalid IPv6 literals
+  const malformedOrigin = 'http://[::1/';
+  const malformedHost = '[::1';
+
+  const transportModes = [
+    {
+      title: 'sockjs',
+      transportMode: 'sockjs',
+      // raw websocket endpoint of the sockjs server
+      socketPath: '/sockjs-node/websocket',
+    },
+    {
+      title: 'ws',
+      transportMode: 'ws',
+      socketPath: '/sockjs-node',
+    },
+  ];
+
+  // resolves with the received events once the server closes the WebSocket
+  // connection, or after a delay if the connection stays open
+  const connectWebSocket = (socketPath, origin) =>
+    new Promise((resolve) => {
+      const data = [];
+      let finished = false;
+      const client = new WebSocket(`ws://localhost:${port}${socketPath}`, {
+        origin,
+      });
+
+      const finish = () => {
+        if (finished) {
+          return;
+        }
+
+        finished = true;
+        client.terminate();
+        resolve(data);
+      };
+
+      client.on('open', () => {
+        data.push('open');
+      });
+
+      client.on('message', (message) => {
+        data.push(message);
+      });
+
+      client.on('close', () => {
+        data.push('close');
+        finish();
+      });
+
+      client.on('error', () => {
+        data.push('error');
+        finish();
+      });
+
+      setTimeout(finish, 5000);
+    });
+
+  // sent over a raw socket so the malformed `Host` reaches the server as-is,
+  // resolves with the raw response
+  const sendRawRequest = (host) =>
+    new Promise((resolve) => {
+      let response = '';
+      const socket = net.connect(port, 'localhost', () => {
+        socket.write(
+          [
+            'GET /main.js HTTP/1.1',
+            `Host: ${host}`,
+            'Connection: close',
+            '',
+            '',
+          ].join('\r\n')
+        );
+      });
+
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk) => {
+        response += chunk;
+      });
+      socket.on('close', () => resolve(response));
+      socket.on('error', () => resolve(response));
+    });
+
+  // the server must still be alive: a normal request still succeeds
+  const getBundleStatus = () =>
+    new Promise((resolve, reject) => {
+      http
+        .get({ host: 'localhost', port, path: '/main.js' }, (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        })
+        .on('error', reject);
+    });
+
+  [
+    {
+      title: 'as parsed by url.parse()',
+      throwOnMalformed: false,
+    },
+    {
+      // `url.parse()` throws on an invalid IPv6 literal on Node.js >= 18,
+      // older versions resolve a bogus hostname instead
+      title: 'when url.parse() throws on them (as on Node.js >= 18)',
+      throwOnMalformed: true,
+    },
+  ].forEach((parser) => {
+    describe(parser.title, () => {
+      let parseSpy;
+
+      beforeEach(() => {
+        if (parser.throwOnMalformed) {
+          const parse = url.parse;
+
+          parseSpy = jest
+            .spyOn(url, 'parse')
+            .mockImplementation((input, ...args) => {
+              if (typeof input === 'string' && /\[[^\]]*$/.test(input)) {
+                const error = new TypeError(`Invalid URL: ${input}`);
+
+                error.code = 'ERR_INVALID_URL';
+
+                throw error;
+              }
+
+              return parse.call(url, input, ...args);
+            });
+        }
+      });
+
+      afterEach(() => {
+        if (parseSpy) {
+          parseSpy.mockRestore();
+          parseSpy = null;
+        }
+      });
+
+      transportModes.forEach((mode) => {
+        describe(`with the "${mode.title}" transport mode`, () => {
+          beforeEach((done) => {
+            testServer.start(
+              config,
+              { port, transportMode: mode.transportMode },
+              done
+            );
+          });
+
+          afterEach(testServer.close);
+
+          it('should reject a WebSocket connection with a malformed Origin header without crashing', () =>
+            connectWebSocket(mode.socketPath, malformedOrigin)
+              .then((data) => {
+                expect(data).toContain(invalidHeaderMessage);
+                expect(data).toContain('close');
+
+                return getBundleStatus();
+              })
+              .then((status) => {
+                expect(status).toBe(200);
+              }));
+        });
+      });
+
+      describe('with default options', () => {
+        let server;
+        let invalidateSpy;
+
+        beforeEach((done) => {
+          server = testServer.start(config, { port }, done);
+          invalidateSpy = jest.spyOn(server, 'invalidate');
+        });
+
+        afterEach((done) => {
+          invalidateSpy.mockRestore();
+          testServer.close(done);
+        });
+
+        it('should handle a request with a malformed Host header without crashing', () =>
+          sendRawRequest(malformedHost)
+            .then((response) => {
+              // answered, not a server error
+              expect(response).toMatch(/^HTTP\/1\.1 200 /);
+
+              // a host the url-parser rejects is never trusted
+              if (parser.throwOnMalformed) {
+                expect(response).toContain('Invalid Host header');
+                expect(response).not.toContain('Hey.');
+              }
+
+              return getBundleStatus();
+            })
+            .then((status) => {
+              expect(status).toBe(200);
+            }));
+
+        it('should block requests to /webpack-dev-server/invalidate with a malformed Origin header', (done) => {
+          request(`http://localhost:${port}`)
+            .get('/webpack-dev-server/invalidate')
+            .set({ Origin: malformedOrigin })
+            .expect(403)
+            .expect((res) => {
+              expect(res.text).toEqual('Cross-Origin request blocked');
+              expect(invalidateSpy).not.toHaveBeenCalled();
+            })
+            .end(done);
+        });
+      });
+    });
+  });
+
+  // a scheme without a host (e.g. `javascript:`) resolves no hostname at all,
+  // which must not break the `allowedHosts` subdomain wildcard matching
+  describe("with a hostless scheme and the 'allowedHosts' option with a subdomain wildcard", () => {
+    const hostlessValue = 'javascript://evil.example.com';
+
+    transportModes.forEach((mode) => {
+      describe(`with the "${mode.title}" transport mode`, () => {
+        beforeEach((done) => {
+          testServer.start(
+            config,
+            {
+              port,
+              allowedHosts: ['.example.com'],
+              transportMode: mode.transportMode,
+            },
+            done
+          );
+        });
+
+        afterEach(testServer.close);
+
+        it('should reject a WebSocket connection with a hostless Origin header without crashing', () =>
+          connectWebSocket(mode.socketPath, hostlessValue)
+            .then((data) => {
+              expect(data).toContain(invalidHeaderMessage);
+              expect(data).toContain('close');
+
+              return getBundleStatus();
+            })
+            .then((status) => {
+              expect(status).toBe(200);
+            }));
+      });
+    });
+
+    describe('with a plain request', () => {
+      beforeEach((done) => {
+        testServer.start(
+          config,
+          { port, allowedHosts: ['.example.com'] },
+          done
+        );
+      });
+
+      afterEach(testServer.close);
+
+      it('should reject a request with a hostless Host header without crashing', () =>
+        sendRawRequest(hostlessValue)
+          .then((response) => {
+            expect(response).toMatch(/^HTTP\/1\.1 200 /);
+            expect(response).toContain('Invalid Host header');
+            expect(response).not.toContain('Hey.');
+
+            return getBundleStatus();
+          })
+          .then((status) => {
+            expect(status).toBe(200);
+          }));
     });
   });
 });

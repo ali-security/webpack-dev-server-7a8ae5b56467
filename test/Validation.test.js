@@ -5,6 +5,7 @@
   array-bracket-spacing
 */
 
+const url = require('url');
 const webpack = require('webpack');
 const Server = require('../lib/Server');
 const schema = require('../lib/options.json');
@@ -478,6 +479,158 @@ describe('Validation', () => {
       if (!server.checkHeaders(headers, 'host', true, false)) {
         throw new Error("Validation didn't pass");
       }
+    });
+  });
+
+  describe('malformed Host/Origin headers', () => {
+    afterEach((done) => {
+      server.close(() => {
+        done();
+      });
+    });
+
+    // malformed values (invalid IPv6 literals)
+    const malformedHosts = ['[::1', '[::1:8080', 'http://[::1/'];
+    const malformedOrigins = ['http://[::1/', 'http://[::1', '[::1'];
+
+    [
+      {
+        title: 'as parsed by url.parse()',
+        throwOnMalformed: false,
+      },
+      {
+        // `url.parse()` throws on an invalid IPv6 literal on Node.js >= 18,
+        // older versions resolve a bogus hostname instead
+        title: 'when url.parse() throws on them (as on Node.js >= 18)',
+        throwOnMalformed: true,
+      },
+    ].forEach((parser) => {
+      describe(parser.title, () => {
+        let parseSpy;
+
+        beforeEach(() => {
+          if (parser.throwOnMalformed) {
+            const parse = url.parse;
+
+            parseSpy = jest
+              .spyOn(url, 'parse')
+              .mockImplementation((input, ...args) => {
+                if (typeof input === 'string' && /\[[^\]]*$/.test(input)) {
+                  const error = new TypeError(`Invalid URL: ${input}`);
+
+                  error.code = 'ERR_INVALID_URL';
+
+                  throw error;
+                }
+
+                return parse.call(url, input, ...args);
+              });
+          }
+        });
+
+        afterEach(() => {
+          if (parseSpy) {
+            parseSpy.mockRestore();
+            parseSpy = null;
+          }
+        });
+
+        // a host the url-parser rejects is never trusted, a host it resolves
+        // (to a bogus hostname) is checked as before, without throwing
+        const expectHostCheck = (check) => {
+          if (parser.throwOnMalformed) {
+            expect(check()).toBe(false);
+          } else {
+            expect(check).not.toThrow();
+          }
+        };
+
+        it('should handle malformed host headers', () => {
+          server = new Server(compiler, {});
+
+          malformedHosts.forEach((host) => {
+            const headers = { host };
+
+            expectHostCheck(() => server.checkHost(headers));
+            expectHostCheck(() =>
+              server.checkHeaders(headers, 'host', true, false)
+            );
+          });
+        });
+
+        it('should handle malformed host headers with allowedHosts and public', () => {
+          server = new Server(compiler, {
+            allowedHosts: ['.example.com', 'localhost'],
+            public: 'test.host:80',
+          });
+
+          malformedHosts.forEach((host) => {
+            const headers = { host };
+
+            expectHostCheck(() => server.checkHost(headers));
+            expectHostCheck(() =>
+              server.checkHeaders(headers, 'host', true, false)
+            );
+          });
+        });
+
+        it('should not allow malformed origin headers', () => {
+          server = new Server(compiler, {});
+
+          malformedOrigins.forEach((origin) => {
+            [
+              { host: 'localhost:8080', origin },
+              { host: '[::1', origin },
+            ].forEach((headers) => {
+              expect(server.isSameOrigin(headers)).toBe(false);
+              expect(server.checkOrigin(headers)).toBe(false);
+            });
+          });
+        });
+
+        it('should not treat requests with a malformed origin header as same-origin requests', () => {
+          server = new Server(compiler, {});
+
+          malformedOrigins.forEach((origin) => {
+            const req = { headers: { host: 'localhost:8080', origin } };
+
+            expect(server.isSameOriginRequest(req)).toBe(false);
+          });
+        });
+
+        it('should still allow valid host and origin headers', () => {
+          server = new Server(compiler, {});
+
+          [
+            { host: 'localhost:8080', origin: 'http://localhost:8080' },
+            { host: '[::1]:8080', origin: 'http://[::1]:8080' },
+          ].forEach((headers) => {
+            expect(server.checkHost(headers)).toBe(true);
+            expect(server.checkOrigin(headers)).toBe(true);
+            expect(server.isSameOriginRequest({ headers })).toBe(true);
+          });
+        });
+      });
+    });
+
+    // a scheme without a host (e.g. `javascript:`) resolves no hostname at all
+    it('should not allow host and origin headers without a hostname', () => {
+      server = new Server(compiler, {
+        allowedHosts: ['.example.com'],
+        public: 'test.host:80',
+      });
+
+      ['javascript://evil.example.com', 'javascript://localhost'].forEach(
+        (value) => {
+          expect(server.checkHost({ host: value })).toBe(false);
+          expect(
+            server.checkHeaders({ host: value }, 'host', true, false)
+          ).toBe(false);
+          expect(
+            server.checkOrigin({ host: 'localhost:8080', origin: value })
+          ).toBe(false);
+        }
+      );
     });
   });
 });
