@@ -75,6 +75,33 @@ describe('cross-origin requests', () => {
         })
         .end(done);
     });
+
+    // @see https://github.com/webpack/webpack-dev-server/security/advisories/GHSA-79cf-xcqc-c78w
+    // browsers do not send fetch metadata headers to non-HTTPS origins, so the
+    // `Cross-Origin-Resource-Policy` header must make the browser block the
+    // cross-origin `<script src="...">` load instead
+    [`http://localhost:${port}`, `http://127.0.0.1:${port}`].forEach(
+      (origin) => {
+        it(`should set the 'Cross-Origin-Resource-Policy: same-origin' header for requests without fetch metadata headers (${origin})`, (done) => {
+          request(origin)
+            .get('/main.js')
+            .expect('Cross-Origin-Resource-Policy', 'same-origin')
+            .expect(200, done);
+        });
+      }
+    );
+
+    it("should set the 'Cross-Origin-Resource-Policy: same-origin' header for same-origin no-cors script tag requests", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .set({
+          'Sec-Fetch-Mode': 'no-cors',
+          'Sec-Fetch-Site': 'same-origin',
+          'Sec-Fetch-Dest': 'script',
+        })
+        .expect('Cross-Origin-Resource-Policy', 'same-origin')
+        .expect(200, done);
+    });
   });
 
   describe("with the 'headers' option allowing any origin", () => {
@@ -112,6 +139,97 @@ describe('cross-origin requests', () => {
         .set(crossSiteNoCorsHeaders)
         .expect(403, done);
     });
+
+    it("should not set the 'Cross-Origin-Resource-Policy' header", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .expect('Access-Control-Allow-Origin', '*')
+        .expect(200)
+        .expect((res) => {
+          expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+        })
+        .end(done);
+    });
+  });
+
+  describe("with the 'headers' option allowing any origin as an array value", () => {
+    beforeAll((done) => {
+      testServer.start(
+        config,
+        {
+          port,
+          headers: {
+            'access-control-allow-origin': ['*'],
+          },
+        },
+        done
+      );
+    });
+
+    afterAll(testServer.close);
+
+    it("should not set the 'Cross-Origin-Resource-Policy' header", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .expect('Access-Control-Allow-Origin', '*')
+        .expect(200)
+        .expect((res) => {
+          expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+        })
+        .end(done);
+    });
+  });
+
+  // no-cors embedding is not governed by CORS, so a specific origin must not
+  // disable the `Cross-Origin-Resource-Policy` header
+  describe("with the 'headers' option allowing a specific origin", () => {
+    beforeAll((done) => {
+      testServer.start(
+        config,
+        {
+          port,
+          headers: {
+            'Access-Control-Allow-Origin': 'http://foo.example.com',
+          },
+        },
+        done
+      );
+    });
+
+    afterAll(testServer.close);
+
+    it("should set the 'Cross-Origin-Resource-Policy: same-origin' header", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .expect('Access-Control-Allow-Origin', 'http://foo.example.com')
+        .expect('Cross-Origin-Resource-Policy', 'same-origin')
+        .expect(200, done);
+    });
+  });
+
+  describe("with the 'headers' option allowing a specific origin as an array value", () => {
+    beforeAll((done) => {
+      testServer.start(
+        config,
+        {
+          port,
+          headers: {
+            'Access-Control-Allow-Origin': ['http://foo.example.com'],
+          },
+        },
+        done
+      );
+    });
+
+    afterAll(testServer.close);
+
+    it("should set the 'Cross-Origin-Resource-Policy: same-origin' header", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .expect('Access-Control-Allow-Origin', 'http://foo.example.com')
+        .expect('Cross-Origin-Resource-Policy', 'same-origin')
+        .expect(200, done);
+    });
   });
 
   describe("with the 'disableHostCheck' option", () => {
@@ -133,6 +251,16 @@ describe('cross-origin requests', () => {
         .get('/main.js')
         .set(crossSiteNoCorsHeaders)
         .expect(200, done);
+    });
+
+    it("should not set the 'Cross-Origin-Resource-Policy' header", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .expect(200)
+        .expect((res) => {
+          expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+        })
+        .end(done);
     });
   });
 
@@ -168,6 +296,23 @@ describe('cross-origin requests', () => {
         .set(crossSiteNoCorsHeaders)
         .expect(403, done);
     });
+
+    it("should not set the 'Cross-Origin-Resource-Policy' header for a listed host", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .expect(200)
+        .expect((res) => {
+          expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+        })
+        .end(done);
+    });
+
+    it("should set the 'Cross-Origin-Resource-Policy: same-origin' header for a host not listed", (done) => {
+      request(`http://127.0.0.1:${port}`)
+        .get('/main.js')
+        .expect('Cross-Origin-Resource-Policy', 'same-origin')
+        .expect(200, done);
+    });
   });
 
   describe("with the 'public' option", () => {
@@ -189,6 +334,16 @@ describe('cross-origin requests', () => {
         .get('/main.js')
         .set(crossSiteNoCorsHeaders)
         .expect(200, done);
+    });
+
+    it("should not set the 'Cross-Origin-Resource-Policy' header for the public host", (done) => {
+      request(`http://localhost:${port}`)
+        .get('/main.js')
+        .expect(200)
+        .expect((res) => {
+          expect(res.headers['cross-origin-resource-policy']).toBeUndefined();
+        })
+        .end(done);
     });
   });
 });
