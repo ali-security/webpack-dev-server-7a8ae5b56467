@@ -12,6 +12,7 @@ const {
   reloadReadyDelay,
   completeReloadDelay,
 } = require('../helpers/puppeteer-constants');
+const { itSkipOnLegacyNode } = require('../helpers/conditional-test');
 
 const cssFilePath = resolve(__dirname, '../fixtures/reload-config-2/main.css');
 
@@ -54,7 +55,7 @@ describe('client progress', () => {
     });
 
     describe('on browser client', () => {
-      it('should console.log progress', (done) => {
+      itSkipOnLegacyNode('should console.log progress', (done) => {
         runBrowser().then(({ page, browser }) => {
           const res = [];
           page.waitForNavigation({ waitUntil: 'load' }).then(() => {

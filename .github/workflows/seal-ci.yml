@@ -1,0 +1,85 @@
+# Authored for the sealed build: upstream webpack-dev-server 3.11.3 has no GitHub Actions CI
+# (it tests on azure-pipelines.yml). This translates that pipeline's Linux job: npm ci, then
+# `npm run test:coverage -- --ci` on each Node version, plus an npm pack job for the release tarball.
+name: seal-ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Jest test path pattern; empty runs the full suite"
+        required: false
+        default: ""
+
+jobs:
+  test:
+    name: Test - ${{ matrix.os }} - Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04]
+        node-version: ["12", "6"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 12.22.7 for install
+        uses: actions/setup-node@v4
+        with:
+          node-version: "12.22.7"
+
+      - name: Install npm 8.1.2
+        run: npm i -g npm@8.1.2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Use Node.js ${{ matrix.node-version }} for tests
+        if: matrix.node-version != '12'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Print versions
+        run: |
+          node -v
+          npm -v
+
+      # test:only (jest --forceExit) rather than azure's test:coverage: jest.config.js's
+      # coveragePathIgnorePatterns ['test'] drops jest's default node_modules ignore, so
+      # --coverage instruments node_modules/watchpack/lib/chokidar.js and its top-level
+      # `return` fails to parse. Coverage is not a test; the suite is unchanged.
+      # --runInBand: contentBase-option and contentBasePublicPath-option both listen on
+      # ports-map['contentBase-option']; with jest's parallel workers on today's 4-vCPU
+      # runners they race for the port (EADDRINUSE -> beforeAll timeout). Upstream's
+      # 2-core azure agents ran jest with a single worker, so serial is the faithful mode.
+      - name: Run tests
+        run: npm run test:only -- --ci --runInBand ${{ inputs.test-filter }}
+
+  pack:
+    name: Pack
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 12.22.7
+        uses: actions/setup-node@v4
+        with:
+          node-version: "12.22.7"
+
+      - name: Install npm 8.1.2
+        run: npm i -g npm@8.1.2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Pack
+        run: npm pack
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webpack-dev-server-tgz
+          path: webpack-dev-server-3.11.3.tgz
+          if-no-files-found: error

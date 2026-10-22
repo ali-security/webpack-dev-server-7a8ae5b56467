@@ -17,6 +17,7 @@ const {
   reloadReadyDelay,
   completeReloadDelay,
 } = require('../helpers/puppeteer-constants');
+const { itSkipOnLegacyNode } = require('../helpers/conditional-test');
 
 const cssFilePath = resolve(__dirname, '../fixtures/reload-config/main.css');
 
@@ -74,7 +75,7 @@ describe('reload', () => {
       });
 
       describe('on browser client', () => {
-        it(`should reload ${
+        itSkipOnLegacyNode(`should reload ${
           mode.shouldRefresh ? 'with' : 'without'
         } page refresh`, (done) => {
           runBrowser().then(({ page, browser }) => {
