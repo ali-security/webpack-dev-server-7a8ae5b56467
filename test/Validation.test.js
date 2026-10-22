@@ -394,4 +394,90 @@ describe('Validation', () => {
       }
     });
   });
+
+  describe('checkHeaders without validateHost', () => {
+    afterEach((done) => {
+      server.close(() => {
+        done();
+      });
+    });
+
+    it('should not implicitly allow localhost, IP addresses or the listening hostname', () => {
+      const options = {};
+
+      const tests = [
+        'localhost',
+        'localhost:8080',
+        '127.0.0.1',
+        '127.0.0.1:8080',
+        '192.168.1.10:8080',
+        '[::1]',
+        '[::1]:8080',
+        'dev.host:8080',
+      ];
+
+      server = new Server(compiler, options);
+      // hostname of the listening address
+      server.hostname = 'dev.host';
+
+      tests.forEach((test) => {
+        const headers = { host: test };
+
+        // the implicit host check still allows them
+        if (!server.checkHeaders(headers, 'host', true)) {
+          throw new Error(`Validation didn't pass for host ${test}`);
+        }
+
+        if (server.checkHeaders(headers, 'host', true, false)) {
+          throw new Error(`Validation didn't fail for host ${test}`);
+        }
+      });
+    });
+
+    it('should allow hosts listed in allowedHosts', () => {
+      const options = { allowedHosts: ['localhost', '.example.com'] };
+
+      server = new Server(compiler, options);
+
+      ['localhost:8080', 'example.com', 'www.example.com:8080'].forEach(
+        (test) => {
+          const headers = { host: test };
+
+          if (!server.checkHeaders(headers, 'host', true, false)) {
+            throw new Error(`Validation didn't pass for host ${test}`);
+          }
+        }
+      );
+
+      const headers = { host: '127.0.0.1:8080' };
+
+      if (server.checkHeaders(headers, 'host', true, false)) {
+        throw new Error("Validation didn't fail");
+      }
+    });
+
+    it('should allow the hostname of options.public', () => {
+      const options = { public: 'localhost:8080' };
+
+      const headers = { host: 'localhost:8080' };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkHeaders(headers, 'host', true, false)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+
+    it('should always allow any host if options.disableHostCheck is set', () => {
+      const options = { disableHostCheck: true };
+
+      const headers = { host: 'localhost:8080' };
+
+      server = new Server(compiler, options);
+
+      if (!server.checkHeaders(headers, 'host', true, false)) {
+        throw new Error("Validation didn't pass");
+      }
+    });
+  });
 });
